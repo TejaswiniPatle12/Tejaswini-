@@ -1,0 +1,344 @@
+import smtplib
+import speech_recognition as sr
+import pyttsx3
+import os
+import subprocess
+import yt_dlp
+from ctypes import cast, POINTER
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import vlc
+import datetime
+from email.message import EmailMessage
+import time
+import pywhatkit
+import webbrowser
+from deep_translator import GoogleTranslator  
+
+
+# Initialize recognizer & text-to-speech
+listener = sr.Recognizer()
+engine = pyttsx3.init()
+
+# Initialize the TTS engine for Music Control
+engine.setProperty('rate', 150)  # Adjust speech rate (optional)
+
+silent_mode = False  # Flag to track if Cosmo should remain silent
+current_process = None  # Track the currently playing song
+vlc_instance = vlc.Instance()
+vlc_player = vlc_instance.media_player_new()
+
+
+def say(text):
+    if not silent_mode:
+        engine.say(text)
+        engine.runAndWait()
+def takeCommand():
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening...")
+        r.pause_threshold = 1.0
+        r.adjust_for_ambient_noise(source, duration=1)
+        retries = 3
+
+        for _ in range(retries):  # Fixed syntax
+            try:
+                audio = r.listen(source, timeout=7)
+                query = r.recognize_google(audio, language="en-in")
+                print(f"User said: {query}")
+                return query.lower().strip()
+            except sr.UnknownValueError:
+                if not silent_mode:
+                    say("Sorry, I didn't catch that. Please repeat.")
+            except sr.RequestError:
+                if not silent_mode:
+                    say("Could not connect to the speech recognition service.")
+                return None
+            except Exception as e:
+                print(f"Error: {e}")
+                return None
+
+    return None
+
+# Speak function
+def talk(text):
+    engine.say(text)
+    engine.runAndWait()
+
+# Function to recognize voice input
+def get_info():
+    try:
+        with sr.Microphone() as source:
+            print('Listening...')
+            listener.adjust_for_ambient_noise(source,duration=1)#Reduce background noise
+            voice = listener.listen(source)
+            info = listener.recognize_google(voice)
+            print(f"You said: {info}")
+            return info.lower()
+    except sr.UnknownValueError:
+        talk("Sorry, I didn't understand. Please try again.")
+        return get_info()
+    except sr.RequestError:
+        talk("Could not connect to the internet. Check your connection.")
+        exit()
+
+# Function to send email
+def send_email(receiver, subject, message):
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        
+        # Use App Password (replace with your actual App Password)
+        server.login('tejaswinip.cse22@sbjit.edu.in', 'tanupatle')
+        
+        email = EmailMessage()
+        email['From'] = 'tejaswinip.cse22@sbjit.edu.in'
+        email['To'] = receiver
+        email['Subject'] = subject
+        email.set_content(message)
+
+        server.send_message(email)
+        server.quit()
+
+        talk("Your email has been sent successfully.")
+    except Exception as e:
+        talk("Sorry, I could not send the email.")
+        print(f"Error: {e}")
+
+# Email contacts
+email_list = {
+    
+    'ishika': 'ishikaj.cse22@sbjit.edu.in',
+    'tejaswini' :'tejaswini.cse22@sbjit.edu.in'
+}
+
+# Function to get email details from user
+def get_email_info():
+    talk("To whom do you want to send the email?")
+    name = get_info()
+
+    # Handle case where name is not in email_list
+    if name in email_list:
+        receiver = email_list[name]
+    else:
+        talk("I couldn't find that contact. Please say the full email address.")
+        receiver = get_info()
+
+    talk("What is the subject of your email?")
+    subject = get_info()
+
+    talk("What should be the message in your email?")
+    message = get_info()
+
+    send_email(receiver, subject, message)
+
+    talk("Do you want to send another email?")
+    send_more = get_info()
+
+    if 'yes'in send_more:
+        get_email_info()
+
+# Function to adjust system volume using pycaw
+def adjust_system_volume(level):
+    try:
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(IAudioEndpointVolume.iid, CLSCTX_ALL, None)
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+        
+        numbers = [int(s) for s in level.split() if s.isdigit()]
+        if not numbers:
+            talk("Please specify a valid volume level.")
+            return
+
+        change = numbers[0] / 100.0  # Convert to range 0.0 - 1.0
+        if "increase" in level:
+            new_volume = min(volume.GetMasterVolumeLevelScalar() + change, 1.0)
+        elif "decrease" in level:
+            new_volume = max(volume.GetMasterVolumeLevelScalar() - change, 0.0)
+        else:
+            new_volume = change
+
+        volume.SetMasterVolumeLevelScalar(new_volume, None)
+        actual_volume = int(volume.GetMasterVolumeLevelScalar() * 100)  # Convert to percentage
+        talk(f"System volume set to {actual_volume} percent.")
+    except Exception as e:
+        print(f"Error adjusting volume: {e}")
+        talk("Failed to adjust the volume.")
+
+# Function to create and save a note
+def note(note_text):
+    """Creates a note and opens it in Notepad (Windows only)."""
+    date = datetime.datetime.now()
+    file_name = str(date).replace(":", "-") + "-note.txt"
+    with open(file_name, "w") as f:
+        f.write(note_text)
+    subprocess.Popen(["notepad.exe", file_name])
+
+# Function to handle note taking command
+NOTE_STR = ["make a note", "write this down", "remember this","note down"]
+def handle_note_command(query):
+    for phrase in NOTE_STR:
+        if phrase in query:
+            talk("What would you like me to write down?")
+            note_text = get_info().lower()
+            note(note_text)
+            talk("I've made a note of that.")
+            return True
+    return False
+
+# Function to play music using VLC and yt-dlp
+def play_music_online(song_query):
+    global current_process, vlc_player
+    stop_music()  # Ensure previous song stops before playing a new one
+    talk(f"Playing {song_query} without ads.")
+    ydl_opts = {
+        'format': 'bestaudio',
+        'quiet': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(f"ytsearch:{song_query}", download=False)
+        if 'entries' in info:
+            video_url = info['entries'][0]['url']
+            print(f"Playing: {video_url}")
+            media = vlc_instance.media_new(video_url)
+            vlc_player.set_media(media)
+            vlc_player.play()
+
+
+# Dictionary to store application paths
+applications = {
+    "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "notepad": "notepad.exe",
+    "vlc": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+    "word": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+     "powerpoint": "C:\\Program Files\\Microsoft Office\\root\\Office16\\POWERPNT.EXE"
+}
+
+def execute_command(command):
+    """Function to execute commands based on recognized speech."""
+    if not command:
+        return
+
+    # Check if user wants to open an application
+    for app in applications:
+        if app in command:
+            talk(f"Opening {app}")
+            subprocess.Popen(applications[app])
+            return
+
+    # Check if user wants to open a website dynamically
+    if "open" in command:
+        website_name = command.replace("open", "").strip().replace(" ", "")
+        url = f"https://www.{website_name}.com"
+        talk(f"Opening {website_name}")
+        webbrowser.open(url)
+        return
+
+    # Special cases
+    if "play" in command:
+        talk("Playing on YouTube")
+        pywhatkit.playonyt(command.replace("play", "").strip())
+
+    elif "time" in command:
+        current_time = datetime.datetime.now().strftime('%I:%M %p')
+        talk(f"The time is {current_time}")
+
+    else:
+        talk("Sorry, I don't understand that command.")
+
+# Function to stop the music
+def stop_music():
+    """Stops the currently playing music."""
+    global vlc_player
+    if vlc_player.is_playing():
+        vlc_player.stop()
+        talk("Music stopped.")
+
+# for translation
+
+def recognize_punjabi():
+    with sr.Microphone() as source:
+        print('Listening for Punjabi speech...')
+        listener.adjust_for_ambient_noise(source, duration=1)
+        audio = listener.listen(source, timeout=5)
+    
+    try:
+        result = listener.recognize_google(audio, language='pa-IN')
+        return result
+    except Exception as ex:
+        print(f"Error: {ex}")
+        return None
+
+def translate_to_english(text):
+    if text:
+        translated_text = GoogleTranslator(source="pa", target="en").translate(text)
+        print(f"Translated: {translated_text}")
+        talk(f"In English: {translated_text}")
+    else:
+        talk("No text detected to translate.")
+
+ 
+# Main function to handle all commands and requests
+def main():
+    global silent_mode
+    print("COSMO")
+    talk("Hello, I am COSMO AI")
+
+    while True:  # Continuous listening loop
+        query = get_info()
+
+        if "exit" in query or "quit" in query:
+            say("Goodbye!")
+            break  # Stop execution
+
+        if query:
+            if silent_mode:
+                if "cosmo listen" in query:
+                    silent_mode = False
+                    talk("I am listening again.")
+                else:
+                    continue  # Ignore all other commands while in silent mode
+            else:
+                if "translation" in query:
+                    punjabi_text = recognize_punjabi()
+                    translate_to_english(punjabi_text)
+
+                elif "play" in query:
+                    song_query = query.replace("play", "").strip()
+                    if song_query:
+                        play_music_online(song_query)
+                    else:
+                        talk("Please specify the song name and artist.")
+
+                elif "increase volume" in query or "decrease volume" in query or "set volume to" in query:
+                    adjust_system_volume(query)
+
+                elif "stop the song" in query or "stop music" in query or "pause the song" in query:
+                    stop_music()
+                
+                elif ("change the song" in query or "play another song named" in query 
+                      or "i want to hear another song" in query or "play something else" in query or "can we change the song" in query):
+                    talk("Which song do you want to hear?")
+                    new_song_query = get_info()
+                    if new_song_query:
+                        play_music_online(new_song_query)
+
+                elif "cosmo don't say anything for a while" in query:
+                    silent_mode = True
+                    print("COSMO is now in silent mode.")
+                    talk("I will be silent. Say 'COSMO listen' to wake me up.")
+
+                elif "send an email" in query:
+                    get_email_info()
+
+                elif handle_note_command(query):
+                    continue  # Skip the rest of the loop if a note is being made
+
+                else:
+                    execute_command(query)  # Calls the function to open applications/websites
+
+
+   
+# Start main function
+if _name_ == '_main_':
+    main()
